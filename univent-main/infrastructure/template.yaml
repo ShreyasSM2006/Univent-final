@@ -1,0 +1,631 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: UniVent SAM template
+
+Parameters:
+  LambdaExecutionRoleArn:
+    Type: String
+    Default: 'arn:aws:iam::000000000000:role/univent-auto-created'
+    Description: >-
+      Optional existing Lambda execution role ARN (for example the AWS Academy
+      LabRole). Leave the default to create per-function least-privilege roles.
+
+Conditions:
+  UseSuppliedRole: !Not [!Equals [!Ref LambdaExecutionRoleArn, 'arn:aws:iam::000000000000:role/univent-auto-created']]
+  CreateExecutionRoles: !Equals [!Ref LambdaExecutionRoleArn, 'arn:aws:iam::000000000000:role/univent-auto-created']
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: nodejs22.x
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        # Browser origin allowed to call the API. Phase 7 pins this to the
+        # deployed S3/CloudFront origin; '*' is fine while testing locally.
+        CORS_ORIGIN: '*'
+        # Local development identity headers stay off in the deployed stack.
+        # The handlers also refuse those headers whenever AWS_EXECUTION_ENV
+        # is set, which is always the case inside AWS Lambda.
+        UNIVENT_DEV_AUTH: 'false'
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-users'
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: 'OFF'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        UnusedAccountValidityDays: 7
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignUpFunction.Arn
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AWS::StackName}-web'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 7
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      Description: UniVent platform administrators
+      Precedence: 1
+      UserPoolId: !Ref UserPool
+
+  OrganizationsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: organizations
+      Description: Approved organization representatives
+      Precedence: 2
+      UserPoolId: !Ref UserPool
+
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+        - AttributeName: ownerSub
+          AttributeType: S
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: OrganizationOwnerIndex
+          KeySchema:
+            - AttributeName: ownerSub
+              KeyType: HASH
+            - AttributeName: eventId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  RegistrationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: ownerEmail
+          AttributeType: S
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+        - AttributeName: email
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerEmailIndex
+          KeySchema:
+            - AttributeName: ownerEmail
+              KeyType: HASH
+            - AttributeName: eventId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  OrganizationApplicationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userSub
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userSub
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  PreSignUpRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GetEventsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GetEventsTable
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt EventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub '${EventsTable.Arn}/index/OrganizationOwnerIndex'
+
+  OrganizationEventsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadOrganizationEventsAndApproval
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt EventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub '${EventsTable.Arn}/index/OrganizationOwnerIndex'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrganizationApplicationsTable.Arn
+
+  CreateEventRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ManageEventsTable
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub '${EventsTable.Arn}/index/OrganizationOwnerIndex'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrganizationApplicationsTable.Arn
+
+  RegisterRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RegisterEventAndRegistration
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:TransactWriteItems
+                Resource: !GetAtt EventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:TransactWriteItems
+                Resource: !GetAtt RegistrationsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrganizationApplicationsTable.Arn
+
+  GetRegistrationsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GetRegistrationsTables
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt EventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub '${EventsTable.Arn}/index/OrganizationOwnerIndex'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt RegistrationsTable.Arn
+                  - !Sub '${RegistrationsTable.Arn}/index/OwnerEmailIndex'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt RegistrationsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrganizationApplicationsTable.Arn
+
+  OrganizationApplicationsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ManageOrganizationApplications
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt OrganizationApplicationsTable.Arn
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminRemoveUserFromGroup
+                Resource: !GetAtt UserPool.Arn
+
+  UniventApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Description: UniVent REST API
+      EndpointConfiguration: REGIONAL
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+      GatewayResponses:
+        UNAUTHORIZED:
+          StatusCode: 401
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              Access-Control-Allow-Methods: "'GET,POST,PUT,PATCH,OPTIONS'"
+        ACCESS_DENIED:
+          StatusCode: 403
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              Access-Control-Allow-Methods: "'GET,POST,PUT,PATCH,OPTIONS'"
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'GET,POST,PUT,PATCH,OPTIONS'"
+
+  PreSignUpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Restrict student self sign-up to the configured college email domain
+      CodeUri: ../backend/functions/
+      Handler: preSignUp.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt PreSignUpRole.Arn]
+      Environment:
+        Variables:
+          ALLOWED_SIGNUP_DOMAIN: ves.ac.in
+
+  PreSignUpPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreSignUpFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  GetEventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET /events - list all events (public)
+      CodeUri: ../backend/functions/
+      Handler: getEvents.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt GetEventsRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          REGISTRATIONS_OWNER_INDEX: OwnerEmailIndex
+      Events:
+        ListEvents:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /events
+            Method: GET
+
+  CreateEventFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: POST /events - create an event (admin or organization)
+      CodeUri: ../backend/functions/
+      Handler: createEvent.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt CreateEventRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          REGISTRATIONS_OWNER_INDEX: OwnerEmailIndex
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+      Events:
+        CreateEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /events
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  OrganizationEventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET /organization/events - list organization-owned events
+      CodeUri: ../backend/functions/
+      Handler: getOrganizationEvents.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt OrganizationEventsRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          EVENTS_OWNER_INDEX: OrganizationOwnerIndex
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+      Events:
+        ListOrganizationEvents:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /organization/events
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateEventFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: PUT /events/{eventId} - update an event by its owner or an admin
+      CodeUri: ../backend/functions/
+      Handler: updateEvent.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt CreateEventRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          EVENTS_OWNER_INDEX: OrganizationOwnerIndex
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+      Events:
+        UpdateEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /events/{eventId}
+            Method: PUT
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  RegisterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: POST /register - register for an event (student only)
+      CodeUri: ../backend/functions/
+      Handler: register.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt RegisterRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          REGISTRATIONS_OWNER_INDEX: OwnerEmailIndex
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+      Events:
+        Register:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /register
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  GetRegistrationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET /registrations - scoped to the caller's role and event ownership
+      CodeUri: ../backend/functions/
+      Handler: getRegistrations.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt GetRegistrationsRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          REGISTRATIONS_OWNER_INDEX: OwnerEmailIndex
+          EVENTS_OWNER_INDEX: OrganizationOwnerIndex
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+      Events:
+        ListRegistrations:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /registrations
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  OrganizationApplicationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Submit, review, and decide persisted organization applications
+      CodeUri: ../backend/functions/
+      Handler: organizationApplications.handler
+      Role: !If [UseSuppliedRole, !Ref LambdaExecutionRoleArn, !GetAtt OrganizationApplicationsRole.Arn]
+      Environment:
+        Variables:
+          UNIVENT_STORE: dynamodb
+          EVENTS_TABLE: !Ref EventsTable
+          REGISTRATIONS_TABLE: !Ref RegistrationsTable
+          ORGANIZATION_APPLICATIONS_TABLE: !Ref OrganizationApplicationsTable
+          COGNITO_USER_POOL_ID: !Ref UserPool
+          ALLOWED_SIGNUP_DOMAIN: ves.ac.in
+      Events:
+        ListOrGetApplications:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /organization-applications
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        SubmitApplication:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /organization-applications
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        DecideApplication:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UniventApi
+            Path: /admin/organization-applications/{userSub}
+            Method: PATCH
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the UniVent API
+    Value: !Sub "https://${UniventApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito app client ID for the React application
+    Value: !Ref UserPoolClient
+  CognitoRegion:
+    Description: AWS region containing the Cognito User Pool
+    Value: !Ref AWS::Region
+  EventsTableName:
+    Description: DynamoDB events table name
+    Value: !Ref EventsTable
+  OrganizationApplicationsTableName:
+    Description: DynamoDB table for verified organization applications and decisions
+    Value: !Ref OrganizationApplicationsTable
+  RegistrationsTableName:
+    Description: DynamoDB registrations table name
+    Value: !Ref RegistrationsTable
+  RegistrationsOwnerIndexName:
+    Description: GSI used for a signed-in user's registrations
+    Value: OwnerEmailIndex
+  EventsOwnerIndexName:
+    Description: GSI used to list events owned by an organization
+    Value: OrganizationOwnerIndex
