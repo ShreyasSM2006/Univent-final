@@ -46,6 +46,7 @@ export function createLiveApi({ baseUrl, getAuthHeaders, fetchImpl = globalThis.
       response = await fetchImpl(`${root}${path}`, {
         method,
         headers,
+        ...(method === 'GET' ? { cache: 'no-store' } : {}),
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
     } catch {

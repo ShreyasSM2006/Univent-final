@@ -48,6 +48,7 @@ describe('live API transport', () => {
     assert.equal(authCalls, 0)
     assert.equal(calls[0].url, 'https://api.example.test/events')
     assert.equal(calls[0].init.headers.Authorization, undefined)
+    assert.equal(calls[0].init.cache, 'no-store')
   })
 
   it('accepts valid empty list envelopes but rejects malformed event and registration envelopes', async () => {

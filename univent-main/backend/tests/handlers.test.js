@@ -192,6 +192,10 @@ describe('POST /events', () => {
     assert.equal(stored.ownerSub, 'organization-sub-a')
     assert.equal(stored.organizer, 'CodeCell')
     assert.equal(res.json.ownerSub, undefined)
+
+    const feed = await invoke(getEvents.handler, { method: 'GET', path: '/events' })
+    assert.equal(feed.statusCode, 200)
+    assert.ok(feed.json.events.some((event) => event.eventId === res.json.eventId))
   })
 
   it('keeps students from creating events', async () => {

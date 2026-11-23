@@ -41,22 +41,23 @@ export async function getPlatformSummary() {
     totalOrganizations: orgs.length,
     pendingOrgApprovals: orgs.filter((o) => o.approvalStatus === 'pending').length,
     pendingEventApprovals: orgEvents.filter((e) => e.status === 'pending').length,
-    totalEvents: pubEvents.length + orgEvents.length,
+    totalEvents: new Set([...pubEvents, ...orgEvents].map((event) => event.eventId)).size,
     totalRegistrations: regs.length,
   }
 }
 
-// Every event on the platform: public mock events (published system rows,
-// read-only) plus all organization-store events with their workflow status.
+// Organization events now appear in the public feed when published. Keep the
+// management listing unique while retaining their moderation status.
 export async function listPlatformEvents() {
   const [pubEvents, orgEvents] = await Promise.all([listEvents(), mockOrgEvents()])
+  const organizationIds = new Set(orgEvents.map((event) => event.eventId))
   const system = pubEvents.map((e) => ({
     ...e,
     source: 'system',
     status: 'published',
     organizer: e.organizer || 'UniVent',
     orgEmail: '',
-  }))
+  })).filter((event) => !organizationIds.has(event.eventId))
   const org = orgEvents.map((e) => ({ ...e, source: 'organization' }))
   return [...system, ...org].sort((a, b) => String(a.date).localeCompare(String(b.date)))
 }

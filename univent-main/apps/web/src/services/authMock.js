@@ -6,6 +6,7 @@ import {
 
 const USERS_KEY = 'univent.mock-users.v1'
 const SESSION_KEY = 'univent.mock-session.v1'
+const ORGANIZATIONS_KEY = 'univent.organizations.v1'
 const LATENCY_MS = 200
 
 export const DEMO_PASSWORD = 'Demo@123'
@@ -57,13 +58,35 @@ function writeUsers(users) {
   }
 }
 
+function organizationRole(email) {
+  try {
+    const raw = localStorage.getItem(ORGANIZATIONS_KEY)
+    const organizations = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(organizations)) return undefined
+    const application = organizations.find(
+      (org) => String(org.contactEmail || '').trim().toLowerCase() === email,
+    )
+    if (!application) return undefined
+    return String(application.approvalStatus || '').toLowerCase() === 'approved'
+      ? 'organization'
+      : 'student'
+  } catch {
+    return undefined
+  }
+}
+
+function roleForUser(user) {
+  if (user.role === 'admin') return user.role
+  return organizationRole(user.email) || user.role || 'student'
+}
+
 export function getCurrentUser() {
   try {
     const raw = localStorage.getItem(SESSION_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return null
-    return { role: 'student', ...parsed }
+    return { ...parsed, role: roleForUser(parsed) }
   } catch {
     return null
   }
@@ -145,7 +168,7 @@ export async function signIn({ email, password }) {
   if (ensureDemoAccounts(users)) writeUsers(users)
   const match = users.find((u) => u.email === cleanEmail && u.password === password)
   if (!match) throw new Error('Invalid email or password.')
-  const session = { name: match.name, email: match.email, role: match.role || 'student' }
+  const session = { name: match.name, email: match.email, role: roleForUser(match) }
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify(session))
   } catch {

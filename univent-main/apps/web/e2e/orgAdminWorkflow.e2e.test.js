@@ -76,6 +76,50 @@ function eventRow(page, title) {
 }
 
 describe('organization to admin demo workflow (browser E2E)', () => {
+  it('opens the organization workspace after its application is approved', async () => {
+    const { context, page } = await openFreshPage()
+    const email = `org-${Date.now()}@ves.ac.in`
+    try {
+      await page.goto(`${baseUrl}/org/signup`)
+      await page.getByLabel('Representative full name').fill('New Org Representative')
+      await page.getByLabel('Official college email').fill(email)
+      await page.getByLabel('Password').fill('Demo@123')
+      await page.getByRole('button', { name: 'Create account' }).click()
+      await page.waitForURL((url) => url.pathname === '/org/apply')
+
+      await page.getByLabel('Organization name').fill('New Organization')
+      await page.getByLabel('Representative role').fill('Secretary')
+      await page.getByLabel('Representative phone').fill('+1 555 010 1234')
+      await page.getByRole('button', { name: 'Submit application' }).click()
+      await page.getByText(/awaiting Admin review/).waitFor()
+
+      await page.getByRole('button', { name: /New Org Representative/ }).click()
+      await page.getByRole('menuitem', { name: 'Sign out' }).click()
+      await page.waitForURL((url) => url.pathname === '/')
+
+      await signIn(page, 'admin')
+      await page.goto(`${baseUrl}/admin/organizations`)
+      const applicationRow = page.locator('tbody tr').filter({ hasText: email })
+      await applicationRow.getByRole('button', { name: 'Approve' }).click()
+      await page.getByText(/Organization approved/).waitFor()
+      await signOut(page)
+
+      await page.goto(`${baseUrl}/org/signup`)
+      await page.getByRole('link', { name: 'Sign in to apply' }).click()
+      await page.waitForURL((url) => url.pathname === '/signin')
+      await page.getByLabel('Email').fill(email)
+      await page.getByLabel('Password').fill('Demo@123')
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+      await page.waitForURL((url) => url.pathname === '/org')
+      await page.getByRole('link', { name: 'Create Event' }).waitFor()
+
+      await page.goto(`${baseUrl}/org/events/new`)
+      await page.getByLabel('Event title').waitFor()
+    } finally {
+      await context.close()
+    }
+  })
+
   it('keeps a draft out of pending, then submits, approves, and shows published to the org', async () => {
     const { context, page } = await openFreshPage()
     const title = `E2E Approval ${Date.now()}`
@@ -114,6 +158,9 @@ describe('organization to admin demo workflow (browser E2E)', () => {
       await signIn(page, 'organization')
       await page.goto(`${baseUrl}/org/events`)
       await eventRow(page, title).getByText('Published', { exact: true }).waitFor()
+      await page.goto(`${baseUrl}/events`)
+      await page.getByLabel('Search events').fill(title)
+      await page.getByRole('heading', { name: title, exact: true }).waitFor()
     } finally {
       await context.close()
     }

@@ -1,6 +1,7 @@
 import { ApiError } from './apiError.js'
 import { cleanEventInput, validateEventInput } from './eventValidation.js'
 import { mockEvents } from './mockEvents.js'
+import { loadOrgEvents } from './mockOrgEventStore.js'
 
 const LATENCY_MS = 250
 const REGISTRATIONS_KEY = 'univent.registrations.v1'
@@ -88,7 +89,13 @@ function loadCreatedEvents() {
 }
 
 function allEvents() {
-  return [...mockEvents, ...loadCreatedEvents()]
+  const publishedOrgEvents = loadOrgEvents()
+    .filter((event) => event.status === 'published')
+    .map((event) => ({
+      ...event,
+      organizer: event.orgName || event.organizer || '',
+    }))
+  return [...mockEvents, ...loadCreatedEvents(), ...publishedOrgEvents]
 }
 
 function withCounts(events, registrations = loadRegistrations()) {

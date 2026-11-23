@@ -15,6 +15,9 @@ import {
   setOrganizationStatus,
   submitOrganizationApplication,
 } from './organizations.js'
+import { DEMO_PASSWORD, signIn, signOut, signUp } from './authMock.js'
+import { listEvents } from './mockApi.js'
+import { filterEvents } from './eventFilter.js'
 
 const ORG_EMAIL = 'codecell@ves.ac.in'
 const ORG_NAME = 'CodeCell'
@@ -91,6 +94,27 @@ describe('organization and admin demo workflow', () => {
     assert.equal(updated.approvalStatus, 'approved')
   })
 
+  it('grants the organization workspace after approval and removes it when suspended', async () => {
+    const email = 'new-organization@ves.ac.in'
+    await signUp({ name: 'New Organization', email, password: DEMO_PASSWORD })
+    const application = await submitOrganizationApplication({
+      organizationName: 'New Organization',
+      officialEmail: email,
+      representativeName: 'New Representative',
+      representativeTitle: 'Secretary',
+      representativePhone: '+1 555 010 1234',
+    })
+
+    await setOrganizationStatus(application, 'approved')
+    await signOut()
+    assert.equal((await signIn({ email, password: DEMO_PASSWORD })).role, 'organization')
+
+    const approved = (await listOrganizations()).find((row) => row.contactEmail === email)
+    await setOrganizationStatus(approved, 'suspended')
+    await signOut()
+    assert.equal((await signIn({ email, password: DEMO_PASSWORD })).role, 'student')
+  })
+
   it('keeps a saved draft out of the pending queue until it is submitted', async () => {
     const draft = await createOrgEvent(ORG_EMAIL, ORG_NAME, INPUT)
 
@@ -115,6 +139,29 @@ describe('organization and admin demo workflow', () => {
     const pending = (await listAllOrgEvents()).filter((e) => e.status === 'pending')
     assert.ok(pending.some((e) => e.eventId === submitted.eventId))
     assert.ok(summary.pendingEventApprovals >= 1)
+  })
+
+  it('lists organization events in the public feed only after approval and makes them searchable', async () => {
+    const submitted = await createOrgEvent(ORG_EMAIL, ORG_NAME, INPUT, { submit: true })
+    assert.equal((await listEvents()).some((event) => event.eventId === submitted.eventId), false)
+
+    await moderateOrgEvent(submitted.eventId, 'approve')
+    const feed = await listEvents()
+    const published = feed.find((event) => event.eventId === submitted.eventId)
+
+    assert.ok(published)
+    assert.equal(published.organizer, ORG_NAME)
+    assert.equal(
+      filterEvents(feed, { query: 'Demo Workflow Event' }).some((event) => event.eventId === submitted.eventId),
+      true,
+    )
+    assert.equal(
+      filterEvents(feed, { query: ORG_NAME }).some((event) => event.eventId === submitted.eventId),
+      true,
+    )
+    const platformEvents = await listPlatformEvents()
+    assert.equal(platformEvents.filter((event) => event.eventId === submitted.eventId).length, 1)
+    assert.equal((await getPlatformSummary()).totalEvents, platformEvents.length)
   })
 
   it('shows the organization that its event was approved', async () => {

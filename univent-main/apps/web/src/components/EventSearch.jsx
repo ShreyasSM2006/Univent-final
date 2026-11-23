@@ -17,7 +17,7 @@ export default function EventSearch({
         <input
           id={searchId}
           type="search"
-          placeholder="Search by title, venue, or keyword…"
+          placeholder="Search by title, venue, organizer, category, or keyword…"
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
         />
